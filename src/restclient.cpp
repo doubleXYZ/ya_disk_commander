@@ -232,7 +232,8 @@ void YdiskRestClient::move(const std::string& from, const std::string& to, bool 
 
     HttpResponse response = send("POST", target.str());
 
-    if (response.status == 201)
+    /* documented: 201 (done) / 202 (async); some API servers also answer 200 */
+    if (response.status == 200 || response.status == 201)
         return;
     if (response.status == 202) {
         wait_success_operation(response.body);
@@ -250,7 +251,8 @@ void YdiskRestClient::copy(const std::string& from, const std::string& to, bool 
 
     HttpResponse response = send("POST", target.str());
 
-    if (response.status == 201)
+    /* documented: 201 (done) / 202 (async); some API servers also answer 200 */
+    if (response.status == 200 || response.status == 201)
         return;
     if (response.status == 202) {
         wait_success_operation(response.body);

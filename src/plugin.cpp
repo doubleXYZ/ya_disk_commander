@@ -15,7 +15,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <memory>
 #include <vector>
 
@@ -30,7 +32,10 @@ int g_plugin_number = 0;
 int g_crypto_number = 0;
 std::wstring g_config_path;
 std::string g_oauth_token;
-thread_local bool g_folder_operation = false;
+
+/* Files larger than this trigger a confirmation when Total Commander downloads
+   them to the temporary folder for viewing/editing (F3/F4). */
+const unsigned long long kLargeFileWarningSize = 1024ull * 1024ull; /* 1 MB */
 
 tProgressProc g_progress = NULL;
 tProgressProcW g_progress_w = NULL;
@@ -216,7 +221,7 @@ bool fill_listing(const RemotePath& path, FindState& state)
         trash.dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
         state.items.push_back(trash);
     }
-    return !state.items.empty();
+    return true;
 }
 
 bool progress_update(unsigned long long done, unsigned long long total,
@@ -251,6 +256,47 @@ ydisk::ProgressFn transfer_progress(const std::wstring& source, const std::wstri
 bool local_overwrite_allowed(const std::wstring& path, int flags)
 {
     return !file_exists(path) || (flags & FS_COPYFLAGS_OVERWRITE) != 0;
+}
+
+std::wstring format_size(unsigned long long size)
+{
+    WCHAR buffer[64];
+    if (size >= 1024ull * 1024ull * 1024ull)
+        swprintf(buffer, 64, L"%.1f GB", (double)size / (1024.0 * 1024.0 * 1024.0));
+    else if (size >= 1024ull * 1024ull)
+        swprintf(buffer, 64, L"%.1f MB", (double)size / (1024.0 * 1024.0));
+    else if (size >= 1024ull)
+        swprintf(buffer, 64, L"%.1f KB", (double)size / 1024.0);
+    else
+        swprintf(buffer, 64, L"%llu bytes", size);
+    return buffer;
+}
+
+/* Total Commander downloads plugin files to the system temp folder only when
+   viewing (F3) or editing (F4) them; a plain copy targets a folder the user
+   chose, so no warning is shown there. */
+bool is_temp_download(const std::wstring& local)
+{
+    WCHAR temp[MAX_PATH + 1];
+    DWORD length = GetTempPathW(MAX_PATH, temp);
+    if (length == 0 || length > MAX_PATH)
+        return false;
+    std::wstring lower_local(local), lower_temp(temp, length);
+    std::transform(lower_local.begin(), lower_local.end(), lower_local.begin(), ::towlower);
+    std::transform(lower_temp.begin(), lower_temp.end(), lower_temp.begin(), ::towlower);
+    return lower_local.compare(0, lower_temp.size(), lower_temp) == 0;
+}
+
+bool confirm_large_download(const std::wstring& file_name, unsigned long long size)
+{
+    std::wstring title = L"Yandex Disk";
+    std::wstring text = L"The file\r\n" + file_name + L"\r\nhas a size of " + format_size(size) +
+                        L" and will be downloaded to the temporary folder before it can be opened."
+                        L"\r\n\r\nContinue?";
+    if (g_request_w)
+        return g_request_w(g_plugin_number, RT_MsgYesNo, &title[0], &text[0], NULL, 0) != FALSE;
+    return MessageBoxW(NULL, text.c_str(), title.c_str(),
+                       MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND) == IDYES;
 }
 
 int operation_error(const std::exception& exception, int code)
@@ -317,24 +363,32 @@ YDISK_EXPORT void DCPCALL FsSetCryptCallback(tCryptProc crypt, int crypto_number
 
 YDISK_EXPORT HANDLE DCPCALL FsFindFirstW(WCHAR* path_text, WIN32_FIND_DATAW* find_data)
 {
-    if (!path_text || !find_data || g_folder_operation)
+    if (!path_text || !find_data)
         return INVALID_HANDLE_VALUE;
     if (!ensure_token()) {
-        if (!g_folder_operation)
-            report_missing_token();
+        report_missing_token();
         return INVALID_HANDLE_VALUE;
     }
 
     try {
         RemotePath path = parse_remote_path(path_text);
         std::unique_ptr<FindState> state(new FindState());
-        if (!fill_listing(path, *state))
+        fill_listing(path, *state);
+        if (state->items.empty()) {
+            /* WFX SDK contract for an empty folder: return INVALID_HANDLE_VALUE
+               with last error ERROR_NO_MORE_FILES. Total Commander then opens
+               the folder and shows an empty panel; any other error code aborts
+               with an error dialog. Returning a handle with a zeroed find_data
+               made TC display a bogus nameless entry instead. */
+            SetLastError(ERROR_NO_MORE_FILES);
             return INVALID_HANDLE_VALUE;
+        }
         *find_data = state->items[0];
         state->index = 0;
         return reinterpret_cast<HANDLE>(state.release());
     } catch (const std::exception& exception) {
         report_exception(exception);
+        SetLastError(ERROR_PATH_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
 }
@@ -377,7 +431,7 @@ YDISK_EXPORT BOOL DCPCALL FsMkDirW(WCHAR* path_text)
 }
 
 YDISK_EXPORT int DCPCALL FsGetFileW(WCHAR* remote_name, WCHAR* local_name, int copy_flags,
-                                    RemoteInfoStruct*)
+                                    RemoteInfoStruct* info)
 {
     if (!remote_name || !local_name)
         return FS_FILE_NOTFOUND;
@@ -392,9 +446,22 @@ YDISK_EXPORT int DCPCALL FsGetFileW(WCHAR* remote_name, WCHAR* local_name, int c
         return FS_FILE_EXISTS;
     try {
         RemotePath remote = parse_remote_path(remote_name);
+        if (info && is_temp_download(local)) {
+            unsigned long long size = ((unsigned long long)info->SizeHigh << 32) | info->SizeLow;
+            if (size > kLargeFileWarningSize && !confirm_large_download(remote_name, size))
+                return FS_FILE_USERABORT;
+        }
         YdiskRestClient client;
         client.set_oauth_token(g_oauth_token);
         client.download_file(remote.api_path, local, transfer_progress(remote_name, local));
+        if ((copy_flags & FS_COPYFLAGS_MOVE) != 0) {
+            /* With FS_COPYFLAGS_MOVE the plugin itself must delete the remote
+               source after a successful download (WFX SDK, FsGetFile). */
+            if (remote.trash)
+                client.delete_from_trash(remote.api_path);
+            else
+                client.remove_resource(remote.api_path);
+        }
         return FS_FILE_OK;
     } catch (const user_abort&) {
         return FS_FILE_USERABORT;
@@ -419,6 +486,14 @@ YDISK_EXPORT int DCPCALL FsPutFileW(WCHAR* local_name, WCHAR* remote_name, int c
         client.set_oauth_token(g_oauth_token);
         client.upload_file(remote.api_path, local_name, (copy_flags & FS_COPYFLAGS_OVERWRITE) != 0,
                            transfer_progress(local_name, remote_name));
+        if ((copy_flags & FS_COPYFLAGS_MOVE) != 0) {
+            /* With FS_COPYFLAGS_MOVE the plugin itself must delete the local
+               source file after a successful upload (WFX SDK, FsPutFile). The
+               upload is already done, so a delete failure is only reported. */
+            if (!DeleteFileW(local_name))
+                report_error(L"The file was uploaded, but the local source file could not be deleted: " +
+                             std::wstring(local_name));
+        }
         return FS_FILE_OK;
     } catch (const user_abort&) {
         return FS_FILE_USERABORT;
@@ -568,10 +643,12 @@ YDISK_EXPORT int DCPCALL FsExecuteFileW(HWND parent, WCHAR* remote_name, WCHAR* 
     }
 }
 
-YDISK_EXPORT void DCPCALL FsStatusInfoW(WCHAR*, int start_end, int operation)
+YDISK_EXPORT void DCPCALL FsStatusInfoW(WCHAR*, int, int)
 {
-    if (operation == FS_STATUS_OP_DELETE || operation == FS_STATUS_OP_RENMOV_MULTI)
-        g_folder_operation = (start_end == FS_STATUS_START);
+    /* Total Commander, unlike Double Commander, always enumerates a folder
+       before deleting or moving it, so the Linux original's trick of refusing
+       FsFindFirstW during FS_STATUS_OP_DELETE/RENMOV_MULTI cannot be used
+       here - it aborts the whole operation. Nothing to track. */
 }
 
 YDISK_EXPORT BOOL DCPCALL FsGetBackgroundFlags(void)
