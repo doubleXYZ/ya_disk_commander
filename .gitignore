@@ -1,0 +1,6 @@
+build/
+*.o
+*.obj
+*.tmp
+.vscode/
+tests/smoke_config_tmp.json
