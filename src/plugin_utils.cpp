@@ -10,6 +10,7 @@ Copyright (C) 2026 doublexyz, LGPL 2.1 or later (see README.md)
 
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <memory>
 
 #include <wincrypt.h>
@@ -621,6 +622,31 @@ bool save_config(const std::wstring& path, const PluginConfig& config)
         object["client_id"] = config.client_id;
 
     return write_file_content(path, json11::Json(object).dump());
+}
+
+bool tc_ui_is_russian(const std::wstring& plugin_config_path)
+{
+    /* Total Commander stores the chosen interface language in wincmd.ini
+       ([Configuration] languageini=wcmd_rus.lng), which lives in the same
+       directory as the plugin ini. A Russian language pack is recognised by
+       "rus" in the file name (wcmd_rus.lng, wcmd_ext_rus.lng, ...). */
+    if (!plugin_config_path.empty()) {
+        size_t separator = plugin_config_path.find_last_of(L"\\/");
+        std::wstring wincmd = (separator != std::wstring::npos)
+                                  ? plugin_config_path.substr(0, separator + 1) + L"wincmd.ini"
+                                  : L"wincmd.ini";
+        WCHAR value[MAX_PATH] = {0};
+        DWORD length = ::GetPrivateProfileStringW(L"Configuration", L"languageini", L"",
+                                                  value, MAX_PATH, wincmd.c_str());
+        if (length > 0) {
+            std::wstring language(value, length);
+            for (size_t i = 0; i < language.size(); ++i)
+                language[i] = (wchar_t)::towlower(language[i]);
+            return language.find(L"rus") != std::wstring::npos;
+        }
+    }
+    /* No explicit language configured: Total Commander follows the OS. */
+    return PRIMARYLANGID(::GetUserDefaultUILanguage()) == LANG_RUSSIAN;
 }
 
 } /* namespace ydisk */

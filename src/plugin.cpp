@@ -287,12 +287,29 @@ bool is_temp_download(const std::wstring& local)
     return lower_local.compare(0, lower_temp.size(), lower_temp) == 0;
 }
 
+/* True when Total Commander's interface language is Russian - the plugin then
+   shows its own dialogs in Russian to match the rest of the TC interface. */
+bool ui_is_russian()
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = tc_ui_is_russian(g_config_path) ? 1 : 0;
+    return cached == 1;
+}
+
 bool confirm_large_download(const std::wstring& file_name, unsigned long long size)
 {
     std::wstring title = L"Yandex Disk";
-    std::wstring text = L"The file\r\n" + file_name + L"\r\nhas a size of " + format_size(size) +
-                        L" and will be downloaded to the temporary folder before it can be opened."
-                        L"\r\n\r\nContinue?";
+    std::wstring text;
+    if (ui_is_russian()) {
+        text = L"Файл\r\n" + file_name + L"\r\nимеет размер " + format_size(size) +
+               L" и будет скачан во временную папку, прежде чем его можно будет открыть."
+               L"\r\n\r\nПродолжить?";
+    } else {
+        text = L"The file\r\n" + file_name + L"\r\nhas a size of " + format_size(size) +
+               L" and will be downloaded to the temporary folder before it can be opened."
+               L"\r\n\r\nContinue?";
+    }
     if (g_request_w)
         return g_request_w(g_plugin_number, RT_MsgYesNo, &title[0], &text[0], NULL, 0) != FALSE;
     return MessageBoxW(NULL, text.c_str(), title.c_str(),

@@ -94,6 +94,16 @@ std::wstring config_path_from_ini(const std::string& default_ini_name);
 bool read_config(const std::wstring& path, PluginConfig& config);
 bool save_config(const std::wstring& path, const PluginConfig& config);
 
+/* ------------------------------------------------------------ UI language */
+
+/**
+ * Returns true when Total Commander's user interface is in Russian.
+ * Reads "languageini" from wincmd.ini (it lives in the same directory as the
+ * plugin ini); when no explicit language is configured, it follows the OS user
+ * interface language.
+ */
+bool tc_ui_is_russian(const std::wstring& plugin_config_path);
+
 } /* namespace ydisk */
 
 #endif /* YDISK_PLUGIN_UTILS_H */
